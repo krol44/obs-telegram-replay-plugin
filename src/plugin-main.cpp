@@ -30,14 +30,11 @@ extern "C" {
 #include <util/util.hpp>
 #include <curl/curl.h>
 #include <thread>
-#include <iomanip>
-
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <sys/stat.h>
-#include <sys/types.h>
-#endif
+#include <condition_variable>
+#include <tuple>
+#include <optional>
+#include <src/helper.cpp>
+#include <libobs/util/crc32.h>
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
@@ -74,43 +71,6 @@ std::string get_secret() {
     return secret_data;
 }
 
-std::string generate_random_string_with_time(size_t num_bytes) {
-    const auto now = std::chrono::system_clock::now().time_since_epoch();
-    const auto current_time = std::chrono::duration_cast<std::chrono::seconds>(now).count();
-
-    std::random_device rd;
-    std::mt19937 generator(rd() ^ current_time);
-    std::uniform_int_distribution<int> distribution(0, 255);
-
-    std::vector<unsigned char> bytes(num_bytes);
-    for (auto &byte: bytes) {
-        byte = static_cast<unsigned char>(distribution(generator));
-    }
-
-    std::ostringstream oss;
-    for (const unsigned char byte: bytes) {
-        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
-    }
-
-    return oss.str();
-}
-
-std::vector<std::string> syllables = {
-    "a", "ka", "sa", "ta", "na", "ha", "ma", "ya", "ra", "wa",
-    "i", "ki", "shi", "chi", "ni", "hi", "mi", "ri",
-    "u", "ku", "su", "tsu", "nu", "fu", "mu", "yu", "ru",
-    "e", "ke", "se", "te", "ne", "he", "me", "re",
-    "o", "ko", "so", "to", "no", "ho", "mo", "yo", "ro"
-};
-
-std::string generateRandomJapaneseName(const int syllablesCount) {
-    std::string name;
-    for (int i = 0; i < syllablesCount; ++i) {
-        name += syllables[rand() % syllables.size()];
-    }
-    return name;
-}
-
 std::string read_file(const std::string &filename) {
     std::ifstream file(filename, std::ios::binary);
     std::ostringstream contents;
@@ -127,9 +87,12 @@ std::string getFileExtension(const std::string &filePath) {
     return ".mbMp4";
 }
 
-constexpr size_t CHUNK_SIZE = 10 * 1024 * 1024; // 10bm
 bool send_chunk(const std::string &filename, const char *data, const size_t size, const std::string &token,
-                const bool last_chunk) {
+                const size_t quantity_chunk, const size_t current_chunk_count) {
+    const uint32_t crc32 = calc_crc32(0, data, size);
+
+    blog(LOG_INFO, "Sending chunk from queue: %s * crc32 – %u size – %lu", filename.c_str(), crc32, size);
+
     bool success = false;
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -141,11 +104,10 @@ bool send_chunk(const std::string &filename, const char *data, const size_t size
         headers = curl_slist_append(headers, token_header.c_str());
         const std::string file_name = "File-Name: " + filename;
         headers = curl_slist_append(headers, file_name.c_str());
-        if (last_chunk) {
-            const std::string last_file = "Last-file: yes";
-            headers = curl_slist_append(headers, last_file.c_str());
-            blog(LOG_INFO, "Sending last file – %s", filename.c_str());
-        }
+        const std::string last_file = "Quantity-chunk: " + std::to_string(quantity_chunk);
+        headers = curl_slist_append(headers, last_file.c_str());
+        const std::string file_crc32 = "File-crc32: " + std::to_string(crc32);
+        headers = curl_slist_append(headers, file_crc32.c_str());
 
         long http_code = 0;
 
@@ -162,7 +124,7 @@ bool send_chunk(const std::string &filename, const char *data, const size_t size
         }
 
         if (curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code) == CURLE_OK) {
-            if (http_code == 401 && last_chunk) {
+            if (http_code == 401 && quantity_chunk == current_chunk_count) {
                 blog(LOG_WARNING, "no auth: %ld", http_code);
 
                 save_secret("");
@@ -181,10 +143,34 @@ bool send_chunk(const std::string &filename, const char *data, const size_t size
     return success;
 }
 
+constexpr size_t CHUNK_SIZE = 5 * 1024 * 1024; // 5MB
+
+size_t calculate_chunk_count(const std::string &file_path) {
+    std::ifstream file(file_path, std::ios::binary | std::ios::ate);
+
+    if (!file.is_open()) {
+        return 0;
+    }
+
+    const size_t file_size = file.tellg();
+    file.close();
+
+    if (file_size == 0) {
+        return 0;
+    }
+
+    return (file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
+}
+
+std::mutex mtx;
+std::condition_variable cv;
+int active_max_threads_curl = 0;
+constexpr int max_threads_curl = 20;
+
 void send_file_in_chunks(const std::string &file_path, const std::string &token) {
     std::ifstream file(file_path, std::ios::binary);
     if (!file.is_open()) {
-        blog(LOG_ERROR, "fail open file: %s", file_path.c_str());
+        blog(LOG_ERROR, "Fail open file: %s", file_path.c_str());
         return;
     }
 
@@ -199,27 +185,38 @@ void send_file_in_chunks(const std::string &file_path, const std::string &token)
                                 + "-" + bufferTime + "." + getFileExtension(file_path);
 
     size_t chunk_count = 0;
-    bool last_chunk;
+    size_t quantity_chunk = calculate_chunk_count(file_path);
 
     std::vector<char> buffer(CHUNK_SIZE);
 
     while (file.read(buffer.data(), CHUNK_SIZE) || file.gcount() > 0) {
         std::streamsize bytes_read = file.gcount();
-        if (bytes_read <= 0) break;
+        if (bytes_read <= 0) break; {
+            std::unique_lock<std::mutex> lock(mtx);
+            cv.wait(lock, [] { return active_max_threads_curl < max_threads_curl; });
+            ++active_max_threads_curl;
+        }
 
         chunk_count++;
-        std::stringstream chunk_name;
-        chunk_name << chunk_count << "_" << base_filename;
+        std::string chunk_name = std::to_string(chunk_count) + "_" + base_filename;
 
-        if (file.eof()) {
-            last_chunk = true;
-        }
-
-        blog(LOG_INFO, "Sending chunk: %s", chunk_name.str().c_str());
-        if (bool success = send_chunk(chunk_name.str(), buffer.data(), bytes_read, token, last_chunk); !success) {
-            blog(LOG_ERROR, "Error sending chunk: %s", chunk_name.str().c_str());
-            break;
-        }
+        std::thread(
+            [chunk_name = chunk_name, data = std::vector<char>(buffer.data(), buffer.data() + bytes_read), size =
+                bytes_read, token = token, quantity_chunk = quantity_chunk, chunk_count = chunk_count]() {
+                const bool result = send_chunk(chunk_name, data.data(), size, token, quantity_chunk, chunk_count); {
+                    std::unique_lock<std::mutex> lock(mtx);
+                    --active_max_threads_curl;
+                }
+                if (!result) {
+                    blog(LOG_ERROR, "Failed to send chunk [try again] – %s", chunk_name.c_str());
+                    const bool result2 = send_chunk(chunk_name, data.data(), size, token,
+                                                   quantity_chunk, chunk_count);
+                    if (result2) {
+                        blog(LOG_ERROR, "Failed to send chunk – %s", chunk_name.c_str());
+                    }
+                }
+                cv.notify_one();
+            }).detach();
     }
 
     file.close();
@@ -238,7 +235,6 @@ void on_replay_buffer_stopped(const enum obs_frontend_event event, [[maybe_unuse
                         << "\">Link your OBS with OBSReplayBot</a>";
                 ShowStatusBarMessage(oss.str().c_str());
             } else {
-                // std::thread t1(send_file_with_curl, last_replay, token);
                 std::thread t1(send_file_in_chunks, last_replay, token);
                 t1.detach();
                 blog(LOG_INFO, "Replay file sending: %s", last_replay);
@@ -249,37 +245,22 @@ void on_replay_buffer_stopped(const enum obs_frontend_event event, [[maybe_unuse
     }
 }
 
-bool is_directory(const std::string &path) {
-    struct stat buffer{};
-    if (stat(path.c_str(), &buffer) != 0) {
-        return false;
+bool obs_module_load() {
+    try {
+        if (!is_directory(obs_module_get_config_path(obs_current_module(), ""))) {
+            create_directory();
+        }
+
+        obs_frontend_add_event_callback(on_replay_buffer_stopped, nullptr);
+    } catch (const std::exception &e) {
+        blog(LOG_INFO, "crash – %s", e.what());
+    } catch (...) {
+        blog(LOG_INFO, "crash");
     }
-#ifdef _WIN32
-        return (buffer.st_mode & _S_IFDIR) != 0;
-#else
-    return S_ISDIR(buffer.st_mode);
-#endif
-}
-
-bool create_directory() {
-    const std::string dir_path = obs_module_get_config_path(obs_current_module(), "");
-#ifdef _WIN32
-        return CreateDirectoryA(dir_path.c_str(), NULL) || GetLastError() == ERROR_ALREADY_EXISTS;
-#else
-    return mkdir(dir_path.c_str(), 0700) == 0 || errno == EEXIST;
-#endif
-}
-
-bool obs_module_load(void) {
-    if (!is_directory(obs_module_get_config_path(obs_current_module(), ""))) {
-        create_directory();
-    }
-
-    obs_frontend_add_event_callback(on_replay_buffer_stopped, nullptr);
 
     return true;
 }
 
-void obs_module_unload(void) {
+void obs_module_unload() {
     obs_frontend_remove_event_callback(on_replay_buffer_stopped, nullptr);
 }
