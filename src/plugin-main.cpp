@@ -34,7 +34,7 @@ extern "C" {
 #include <tuple>
 #include <optional>
 #include <src/helper.cpp>
-#include <libobs/util/crc32.h>
+#include <util/crc32.h>
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
