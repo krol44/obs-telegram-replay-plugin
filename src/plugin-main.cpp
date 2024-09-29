@@ -112,7 +112,7 @@ bool send_chunk(const std::string &filename, const char *data, const size_t size
         long http_code = 0;
 
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_URL, "https://obs-replay.krol44.com");
+        curl_easy_setopt(curl, CURLOPT_URL, "https://obs-replay.krol44.com/incoming");
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, data);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, size);
