@@ -59,7 +59,75 @@ std::vector<std::string> syllables = {
 std::string generateRandomJapaneseName(const int syllablesCount) {
     std::string name;
     for (int i = 0; i < syllablesCount; ++i) {
-        name += syllables[rand() % syllables.size()];
+        name += syllables[arc4random() % syllables.size()];
     }
     return name;
+}
+
+std::mutex save_token_mutex;
+
+void save_token(const std::string &token) {
+    std::lock_guard<std::mutex> lock(save_token_mutex);
+
+    const BPtr<char> configPath = obs_module_config_path("settings.json");
+
+    obs_data_t *settings = obs_data_create_from_json_file(configPath.Get());
+    if (!settings) {
+        settings = obs_data_create();
+    }
+    obs_data_set_string(settings, "token", token.c_str());
+
+    obs_data_save_json(settings, configPath.Get());
+    obs_data_release(settings);
+}
+
+std::mutex save_max_threads_curl_mutex;
+
+void save_max_threads_curl(const std::string &max_threads_curl) {
+    std::lock_guard<std::mutex> lock(save_max_threads_curl_mutex);
+
+    const BPtr<char> configPath = obs_module_config_path("settings.json");
+
+    obs_data_t *settings = obs_data_create_from_json_file(configPath.Get());
+    if (!settings) {
+        settings = obs_data_create();
+    }
+    obs_data_set_string(settings, "max_threads_curl", max_threads_curl.c_str());
+
+    obs_data_save_json(settings, configPath.Get());
+    obs_data_release(settings);
+}
+
+std::mutex save_name_bot_mutex;
+void save_name_bot(const std::string &name_bot) {
+    std::lock_guard<std::mutex> lock(save_name_bot_mutex);
+
+    const BPtr<char> configPath = obs_module_config_path("settings.json");
+
+    obs_data_t *settings = obs_data_create_from_json_file(configPath.Get());
+    if (!settings) {
+        settings = obs_data_create();
+    }
+    obs_data_set_string(settings, "name_bot", name_bot.c_str());
+
+    obs_data_save_json(settings, configPath.Get());
+    obs_data_release(settings);
+}
+
+std::string get_config(const std::string &key) {
+    const BPtr<char> configPath = obs_module_config_path("settings.json");
+
+    obs_data_t *settings = obs_data_create_from_json_file(configPath.Get());
+    if (!settings) {
+        obs_data_release(settings);
+        return "";
+    }
+
+    const char *data = obs_data_get_string(settings, key.c_str());
+
+    std::string return_data = data;
+
+    obs_data_release(settings);
+
+    return return_data;
 }
