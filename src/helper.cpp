@@ -27,7 +27,12 @@ bool create_directory() {
 #endif
 }
 
-std::string generate_random_string_with_time(size_t num_bytes) {
+unsigned int random_int() {
+    std::random_device rd;
+    return rd();
+}
+
+std::string generate_random_string_with_time(const size_t num_bytes) {
     const auto now = std::chrono::system_clock::now().time_since_epoch();
     const auto current_time = std::chrono::duration_cast<std::chrono::seconds>(now).count();
 
@@ -59,9 +64,18 @@ std::vector<std::string> syllables = {
 std::string generateRandomJapaneseName(const int syllablesCount) {
     std::string name;
     for (int i = 0; i < syllablesCount; ++i) {
-        name += syllables[arc4random() % syllables.size()];
+        name += syllables[random_int() % syllables.size()];
     }
     return name;
+}
+
+std::string randomJapaneseName() {
+    while (true) {
+        if (const std::string name = generateRandomJapaneseName(2 + static_cast<int>(random_int()) % 3);
+            !name.empty()) {
+            return name;
+        }
+    }
 }
 
 std::mutex save_token_mutex;
@@ -99,6 +113,7 @@ void save_max_threads_curl(const std::string &max_threads_curl) {
 }
 
 std::mutex save_name_bot_mutex;
+
 void save_name_bot(const std::string &name_bot) {
     std::lock_guard<std::mutex> lock(save_name_bot_mutex);
 

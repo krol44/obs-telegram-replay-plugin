@@ -240,8 +240,7 @@ void send_file_in_chunks(const std::string &file_path, const std::string &token)
     char bufferTime[20];
     std::strftime(bufferTime, sizeof(bufferTime), "%d-%m-%Y-%H-%M", now);
     std::cout << bufferTime << std::endl;
-    std::string base_filename = generateRandomJapaneseName(2 + static_cast<int>(arc4random()) % 3)
-                                + "-" + generateRandomJapaneseName(2 + static_cast<int>(arc4random()) % 3)
+    std::string base_filename = randomJapaneseName()+ "-" + randomJapaneseName()
                                 + "-" + bufferTime + "." + getFileExtension(file_path);
 
     size_t chunk_count = 0;
